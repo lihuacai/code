@@ -1,7 +1,7 @@
 """
-QLoRA 大语言模型适配器模块
-对应论文 Fig 2 & Fig 3：4-bit NF4 量化基座 + 低秩适配器 (LoRA)
-实现轻量化指令微调，仅训练约 0.1% 的参数
+QLoRA Adapter Module for Large Language Models
+Corresponding to Figure 2 & Figure 3 in the paper: 4-bit NF4 quantized base model + Low-Rank Adapter (LoRA)
+Implements lightweight instruction fine-tuning with only ~0.1% of parameters trainable
 """
 import os
 import torch
@@ -26,44 +26,44 @@ class QLoRAModel:
         is_train_mode: bool = True
     ):
         """
-        初始化 QLoRA 模型
-        :param base_model_name: 基座大模型本地路径或 HuggingFace 仓库名
-        :param r: LoRA 矩阵秩 (Rank)，论文默认设置为 64
-        :param lora_alpha: LoRA 缩放系数，通常取 r 的 2 倍
-        :param lora_dropout: LoRA 层的 dropout 概率
-        :param target_modules: 注入 LoRA 的目标模块，默认为注意力 Q/K/V/O 投影层
-        :param load_in_4bit: 是否启用 4-bit 量化加载基座
-        :param is_train_mode: 是否为训练模式，训练模式会注入 LoRA 并启用梯度
+        Initialize QLoRA model
+        :param base_model_name: Local path of the base large model or HuggingFace repository name
+        :param r: Rank of LoRA matrices, default set to 64 in the paper
+        :param lora_alpha: LoRA scaling factor, usually set to 2 times of r
+        :param lora_dropout: Dropout probability for LoRA layers
+        :param target_modules: Target modules to inject LoRA, default to attention Q/K/V/O projection layers
+        :param load_in_4bit: Whether to load the base model with 4-bit quantization
+        :param is_train_mode: Whether to enable training mode; LoRA will be injected and gradients enabled in training mode
         """
         self.base_model_name = base_model_name
 
-        # 设备校验：4bit 量化仅支持 CUDA 环境
+        # Device check: 4-bit quantization only supports CUDA environment
         if load_in_4bit and not torch.cuda.is_available():
             raise RuntimeError(
-                "4-bit 量化依赖 CUDA 环境，请安装 GPU 版本 PyTorch 并确保显卡可用。"
-                "CPU 环境请设置 load_in_4bit=False。"
+                "4-bit quantization requires a CUDA environment. Please install the GPU version of PyTorch and ensure a valid GPU is available. "
+                "Set load_in_4bit=False for CPU environments."
             )
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # ========== 1. 加载分词器 ==========
+        # ========== 1. Load Tokenizer ==========
         self.tokenizer = AutoTokenizer.from_pretrained(
             base_model_name,
             trust_remote_code=True
         )
-        # 兼容 Qwen 等无默认 pad_token 的模型，避免生成时报错
+        # Compatible with models without default pad_token (e.g. Qwen) to avoid errors during generation
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         self.tokenizer.padding_side = "right"
 
-        # ========== 2. 4-bit NF4 量化配置 (对应 Fig 2 左侧量化分支) ==========
+        # ========== 2. 4-bit NF4 Quantization Configuration (corresponds to the quantization branch on the left of Figure 2) ==========
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=load_in_4bit,
-            bnb_4bit_quant_type="nf4",          # NormalFloat 4 量化，分布适配性优于 FP4
-            bnb_4bit_compute_dtype=torch.bfloat16,  # 前向计算时反量化为 bf16
-            bnb_4bit_use_double_quant=True,    # 双重量化，对量化常数再次压缩，进一步降低显存
+            bnb_4bit_quant_type="nf4",          # NormalFloat 4 quantization, better distribution adaptability than FP4
+            bnb_4bit_compute_dtype=torch.bfloat16,  # Dequantize to bf16 during forward computation
+            bnb_4bit_use_double_quant=True,    # Double quantization: further compress quantization constants to reduce VRAM usage
         )
 
-        # ========== 3. 加载基座大模型 ==========
+        # ========== 3. Load Base Large Model ==========
         base_model = AutoModelForCausalLM.from_pretrained(
             base_model_name,
             quantization_config=bnb_config,
@@ -71,12 +71,12 @@ class QLoRAModel:
             trust_remote_code=True
         )
 
-        # ========== 4. 训练模式：注入 LoRA 适配器 ==========
+        # ========== 4. Training Mode: Inject LoRA Adapter ==========
         if is_train_mode:
-            # 为 k-bit 训练预处理：冻结量化权重、开启输入层梯度
+            # Preprocessing for k-bit training: freeze quantized weights and enable gradients for input layers
             base_model = prepare_model_for_kbit_training(base_model)
 
-            # LoRA 配置 (对应 Fig 2 右侧：低秩矩阵 A、B)
+            # LoRA configuration (corresponds to the right side of Figure 2: low-rank matrices A and B)
             if target_modules is None:
                 target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -89,16 +89,16 @@ class QLoRAModel:
                 task_type="CAUSAL_LM"
             )
 
-            # 注入适配器：权重更新等效为 ΔW = B * A
+            # Inject adapter: weight update is equivalent to ΔW = B * A
             self.model = get_peft_model(base_model, lora_config)
 
-            # 打印可训练参数量（QLoRA 典型值：约 0.1% 总参数）
+            # Print trainable parameter count (typical QLoRA value: ~0.1% of total parameters)
             print("=" * 60)
-            print("QLoRA 模型初始化完成，可训练参数统计：")
+            print("QLoRA model initialization completed. Trainable parameters statistics:")
             self.model.print_trainable_parameters()
             print("=" * 60)
 
-        # ========== 5. 推理模式：仅加载基座，后续可加载 LoRA 权重 ==========
+        # ========== 5. Inference Mode: Load base model only, LoRA weights can be loaded later ==========
         else:
             self.model = base_model
             self.model.eval()
@@ -113,13 +113,13 @@ class QLoRAModel:
         **kwargs
     ) -> str:
         """
-        模型生成推理
-        :param prompt: 输入提示文本
-        :param max_new_tokens: 最大生成 token 数
-        :param temperature: 采样温度，越高随机性越强
-        :param top_p: 核采样概率阈值
-        :param do_sample: 是否启用随机采样
-        :return: 完整的生成文本（含输入 prompt，与原代码逻辑一致）
+        Model generation inference
+        :param prompt: Input prompt text
+        :param max_new_tokens: Maximum number of tokens to generate
+        :param temperature: Sampling temperature; higher value means more randomness
+        :param top_p: Nucleus sampling probability threshold
+        :param do_sample: Whether to enable stochastic sampling
+        :return: Complete generated text (including input prompt, consistent with original code logic)
         """
         inputs = self.tokenizer(
             prompt,
@@ -143,19 +143,19 @@ class QLoRAModel:
 
     def save_adapter(self, save_dir: str) -> None:
         """
-        保存 LoRA 适配器权重（仅保存可训练的低秩矩阵，文件体积极小）
-        :param save_dir: 权重保存目录
+        Save LoRA adapter weights (only saves trainable low-rank matrices, resulting in very small file size)
+        :param save_dir: Directory to save weights
         """
         os.makedirs(save_dir, exist_ok=True)
         self.model.save_pretrained(save_dir)
         self.tokenizer.save_pretrained(save_dir)
-        print(f"✅ LoRA 适配器已保存至: {os.path.abspath(save_dir)}")
+        print(f" LoRA adapter saved to: {os.path.abspath(save_dir)}")
 
     def load_adapter(self, adapter_dir: str, adapter_name: str = "default") -> None:
         """
-        加载已训练的 LoRA 适配器，用于推理阶段
-        :param adapter_dir: LoRA 权重目录路径
-        :param adapter_name: 适配器命名，支持多适配器切换
+        Load a trained LoRA adapter for inference
+        :param adapter_dir: Path to the LoRA weight directory
+        :param adapter_name: Adapter name, supports switching between multiple adapters
         """
         self.model = PeftModel.from_pretrained(
             self.model,
@@ -163,31 +163,31 @@ class QLoRAModel:
             adapter_name=adapter_name
         )
         self.model.eval()
-        print(f"✅ 已加载 LoRA 适配器 [{adapter_name}]: {os.path.abspath(adapter_dir)}")
+        print(f" LoRA adapter [{adapter_name}] loaded: {os.path.abspath(adapter_dir)}")
 
 
 if __name__ == "__main__":
-    # ========== 快速测试示例 ==========
-    print("正在初始化 QLoRA 模型（训练模式）...")
+    # ========== Quick Test Example ==========
+    print("Initializing QLoRA model (training mode)...")
     
     try:
-        # 初始化模型
+        # Initialize model
         qlora_llm = QLoRAModel(
             base_model_name="Qwen/Qwen-7B-Chat",
             r=64,
             is_train_mode=True
         )
 
-        # 测试生成
-        test_prompt = "请用一句话介绍阿尔茨海默病。"
-        print(f"\n输入提示：{test_prompt}")
+        # Test generation
+        test_prompt = "Please introduce Alzheimer's disease in one sentence."
+        print(f"\nInput prompt: {test_prompt}")
         
         result = qlora_llm.generate(test_prompt, max_new_tokens=50)
-        print(f"生成结果：{result}")
+        print(f"Generation result: {result}")
 
-        # 训练完成后保存适配器权重
+        # Save adapter weights after training
         # qlora_llm.save_adapter("./output/qlora_adapter_v1")
 
     except Exception as e:
-        print(f"运行出错：{e}")
-        print("提示：请确保已安装依赖且拥有可用的 CUDA 环境。")
+        print(f"Runtime error: {e}")
+        print("Hint: Please ensure dependencies are installed and a valid CUDA environment is available.")
