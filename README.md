@@ -140,27 +140,7 @@ If you use this code or the AD-Align dataset in your research, please cite the f
 }
 ```
 
-2. AD-Align Dataset:
-
-```
-@dataset{ad_align_dataset,
-  title={AD-Align: A Domain-Aligned Dataset for Alzheimer's Disease NLP Tasks},
-  author={[Fill in dataset authors]},
-  year={[Fill in publication year]},
-  doi={[Fill in dataset DOI]}
-}
-```
-
-3. Associated manuscript:
-
-```
-@article{your_manuscript_2024,
-  title={[Fill in your manuscript title]},
-  author={[Fill in author list]},
-  journal={PeerJ Computer Science},
-  year={[Fill in publication year]}
-}
-```
+......
 
 ## License & Contribution Guidelines
 
